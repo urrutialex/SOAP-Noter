@@ -182,6 +182,7 @@ function onFormSubmit(e) {
       Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
       return;
     }
+    Logger.log(`Processing sheet: ${sheet.getName()}`);
     processLatestRowIfUnprocessed(sheet);
   } catch (error) {
     Logger.log("Error in onFormSubmit: " + error.toString());
@@ -198,6 +199,7 @@ function onSheetChange(e) {
       Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
       return;
     }
+    Logger.log(`Processing sheet: ${sheet.getName()}`);
     processLatestRowIfUnprocessed(sheet);
   } catch (error) {
     Logger.log("Error in onSheetChange: " + error.toString());
@@ -234,10 +236,12 @@ function processLatestRowIfUnprocessed(sheet) {
   }
 
   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  Logger.log(`Headers found: ${headers.join(', ')}`);
   // Find the Timestamp column index
   const timestampColIdx = headers.indexOf('Timestamp');
-  if (timestampColIdx === -1) {
-    Logger.log('❌ Timestamp column not found.');
+  const responseIdColIdx = headers.findIndex(h => h && h.toLowerCase().includes('response') && h.toLowerCase().includes('id'));
+  if (timestampColIdx === -1 || responseIdColIdx === -1) {
+    Logger.log('❌ Required columns not found (Timestamp or Response ID).');
     return;
   }
 
@@ -264,28 +268,37 @@ function processLatestRowIfUnprocessed(sheet) {
 
   const rowData = data[latestIdx];
   let jobCode = null;
+  let responseId = null;
   const responses = [];
   for (let i = 0; i < headers.length; i++) {
     const columnName = headers[i];
     const value = rowData[i];
     if (columnName === JOB_CODE_COLUMN_NAME) {
       jobCode = value;
+    } else if (columnName && columnName.toLowerCase().includes('response') && columnName.toLowerCase().includes('id')) {
+      responseId = value;
     } else if (columnName && value !== null && value !== '') {
       responses.push({ question: columnName, answer: value });
     }
   }
 
-  if (!jobCode) {
-    Logger.log(`❌ Job Code not found in row ${latestIdx + 2}.`);
+  if (!jobCode || !responseId) {
+    Logger.log(`❌ Job Code or Response ID not found in row ${latestIdx + 2}.`);
     return;
   }
 
-  processSOAPNote(jobCode, responses);
+  // Check if already processed
+  if (isNoteInDoc(jobCode, responseId)) {
+    Logger.log(`Skipping row ${latestIdx + 2} - already processed in Doc.`);
+    return;
+  }
+
+  processSOAPNote(jobCode, responses, responseId);
   Logger.log(`Row ${latestIdx + 2} (latest Timestamp) processed.`);
 }
 
 // === Core Processing Logic: Write SOAP Note to Doc ===
-function processSOAPNote(jobCode, responses) {
+function processSOAPNote(jobCode, responses, responseId, rowNumber = null, uploadTimestampColIdx = -1) {
   try {
     // Use utility functions for Drive/Folder/Doc lookup
     const driveId = getDriveIdByName(jobCode);
@@ -321,8 +334,8 @@ function processSOAPNote(jobCode, responses) {
     const body = doc.getBody();
     // Insert horizontal rule at the top
     body.insertHorizontalRule(0);
-    // Insert timestamp paragraph just below the horizontal rule
-    body.insertParagraph(1, `SOAP Note Entry: ${new Date().toLocaleString()}`).setBold(true);
+    // Insert timestamp paragraph just below the horizontal rule, including Response ID
+    body.insertParagraph(1, `SOAP Note Entry: ${new Date().toLocaleString()} [Response ID: ${responseId}]`).setBold(true);
 
     // Get the SOAP Note Type value for the header
     const noteTypeObj = responses.find(r => r.question === 'Select SOAP Note Type');
@@ -336,6 +349,16 @@ function processSOAPNote(jobCode, responses) {
     // Insert a blank paragraph below the table for spacing
     body.insertParagraph(3, '');
     doc.saveAndClose();
+    
+    // Mark the row as processed if parameters provided
+    if (rowNumber !== null && uploadTimestampColIdx !== -1) {
+      const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+      if (sheet) {
+        sheet.getRange(rowNumber, uploadTimestampColIdx + 1).setValue(new Date());
+        Logger.log(`✅ Marked row ${rowNumber} as processed with timestamp.`);
+      }
+    }
+    
     Logger.log('✅ SOAP note prepended to top of Google Doc.');
   } catch (error) {
     Logger.log("❌ Error in processSOAPNote: " + error.toString());
@@ -361,36 +384,108 @@ function renderDefaultSOAP(body, responses, noteType, headerColor, position) {
   }
 }
 
+// === Utility: Check if Note Exists in Doc ===
+function isNoteInDoc(jobCode, responseId) {
+  try {
+    const driveId = getDriveIdByName(jobCode);
+    if (!driveId) return false;
+    
+    const folderId = ensureFolderInDrive('Session Notes (S.O.A.P.)', driveId);
+    if (!folderId) return false;
+    
+    const docPrefix = deriveDocPrefix(jobCode);
+    const docNamePrefix = docPrefix ? `${docPrefix}_SOAP_LOG_` : TARGET_DOC_NAME;
+    const docId = getDocIdByPrefix(docNamePrefix, folderId, driveId);
+    if (!docId) return false; // No Doc found, so not processed
+    
+    const doc = DocumentApp.openById(docId);
+    const body = doc.getBody();
+    const text = body.getText();
+    
+    // Search for Response ID for uniqueness
+    Logger.log(`Searching for Response ID: ${responseId} in Doc text (length: ${text.length})`);
+    if (text.includes(responseId.toString())) {
+      Logger.log('Response ID found in Doc.');
+      return true;
+    } else {
+      Logger.log('Response ID not found in Doc.');
+      return false;
+    }
+  } catch (error) {
+    Logger.log("Error checking doc: " + error.toString());
+    return false; // Assume not processed on error
+  }
+}
+
 // === Manual Test Helper ===
-function testWithRow(rowNumber) {
+function testWithRow() {
   try {
     const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
-    if (!sheet || rowNumber <= 1 || rowNumber > sheet.getLastRow()) {
-      Logger.log(`❌ Invalid sheet or row ${rowNumber}`);
+    if (!sheet) {
+      Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
       return;
     }
+    Logger.log(`TestWithRow processing sheet: ${sheet.getName()}`);
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const rowData = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
-
-    let jobCode = null;
-    const responses = [];
-
-    for (let i = 0; i < headers.length; i++) {
-      const columnName = headers[i];
-      const value = rowData[i];
-      if (columnName === JOB_CODE_COLUMN_NAME) {
-        jobCode = value;
-      } else if (columnName && value !== null && value !== '') {
-        responses.push({ question: columnName, answer: value });
+    const uploadTimestampColIdx = headers.indexOf('Upload Timestamp');
+    if (uploadTimestampColIdx === -1) {
+      Logger.log('❌ Upload Timestamp column not found. Add it as the last column.');
+      return;
+    }
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return;
+    
+    // Find the first unprocessed row (blank in Upload Timestamp)
+    let startRow = 2; // Start from data rows
+    for (let r = 2; r <= lastRow; r++) {
+      const uploadValue = sheet.getRange(r, uploadTimestampColIdx + 1).getValue();
+      if (!uploadValue) {
+        startRow = r;
+        break;
       }
     }
-
-    if (!jobCode) {
-      Logger.log('❌ Job Code not found.');
-      return;
+    
+    Logger.log(`Starting processing from row ${startRow} to ${lastRow}`);
+    
+    // Process from startRow to lastRow
+    for (let rowNumber = startRow; rowNumber <= lastRow; rowNumber++) {
+      const rowData = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
+      
+      let jobCode = null;
+      let timestamp = null;
+      let responseId = null;
+      const responses = [];
+      
+      for (let i = 0; i < headers.length; i++) {
+        const columnName = headers[i];
+        const value = rowData[i];
+        if (columnName === JOB_CODE_COLUMN_NAME) {
+          jobCode = value;
+        } else if (columnName === 'Timestamp') {
+          timestamp = value;
+        } else if (columnName && columnName.toLowerCase().includes('response') && columnName.toLowerCase().includes('id')) {
+          responseId = value;
+        } else if (columnName && value !== null && value !== '' && columnName !== 'Upload Timestamp') {
+          responses.push({ question: columnName, answer: value });
+        }
+      }
+      
+      if (!jobCode || !timestamp || !responseId) {
+        Logger.log(`❌ Missing data in row ${rowNumber}. Skipping.`);
+        continue;
+      }
+      
+      // Check if already processed
+      if (isNoteInDoc(jobCode, responseId)) {
+        Logger.log(`Skipping row ${rowNumber} - already processed in Doc.`);
+        // Mark as processed anyway to avoid re-checking
+        sheet.getRange(rowNumber, uploadTimestampColIdx + 1).setValue(new Date());
+        continue;
+      }
+      
+      processSOAPNote(jobCode, responses, responseId, rowNumber, uploadTimestampColIdx);
     }
-
-    processSOAPNote(jobCode, responses);
   } catch (error) {
     Logger.log("Error in testWithRow: " + error.toString());
   }
