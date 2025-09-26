@@ -172,40 +172,6 @@ const SOURCE_SHEET_ID = '11okaksQLR-sidlOxysZfsqgGhAWqkJMBtzarq1YGsH4';
 const SHEET_NAME = 'Form Responses 1';
 const USE_ACTIVE_SPREADSHEET = true;
 
-// === Entry Point for Form Submissions ===
-function onFormSubmit(e) {
-  try {
-    Logger.log("=== onFormSubmit TRIGGER FIRED ===");
-    const spreadsheet = getSpreadsheet();
-    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
-      return;
-    }
-    Logger.log(`Processing sheet: ${sheet.getName()}`);
-    processLatestRowIfUnprocessed(sheet);
-  } catch (error) {
-    Logger.log("Error in onFormSubmit: " + error.toString());
-  }
-}
-
-// === Entry Point for Manual Sheet Changes ===
-function onSheetChange(e) {
-  try {
-    Logger.log("=== onSheetChange TRIGGER FIRED ===");
-    const spreadsheet = getSpreadsheet();
-    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
-      return;
-    }
-    Logger.log(`Processing sheet: ${sheet.getName()}`);
-    processLatestRowIfUnprocessed(sheet);
-  } catch (error) {
-    Logger.log("Error in onSheetChange: " + error.toString());
-  }
-}
-
 // === Shared Spreadsheet Access Function ===
 function getSpreadsheet() {
   try {
@@ -350,16 +316,30 @@ function processSOAPNote(jobCode, responses, responseId, rowNumber = null, uploa
     body.insertParagraph(3, '');
     doc.saveAndClose();
     
-    // Mark the row as processed if parameters provided
-    if (rowNumber !== null && uploadTimestampColIdx !== -1) {
-      const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
-      if (sheet) {
-        sheet.getRange(rowNumber, uploadTimestampColIdx + 1).setValue(new Date());
-        Logger.log(`✅ Marked row ${rowNumber} as processed with timestamp.`);
+    // Verify the note was written by checking if Response ID is in the Doc
+    if (isNoteInDoc(jobCode, responseId)) {
+      Logger.log('✅ Verification passed: Note found in Doc.');
+      
+      // Only mark as processed if verified
+      if (rowNumber !== null && uploadTimestampColIdx !== -1) {
+        const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+        if (sheet) {
+          sheet.getRange(rowNumber, uploadTimestampColIdx + 1).setValue(new Date());
+          Logger.log(`✅ Marked row ${rowNumber} as processed with timestamp.`);
+        }
+      }
+      
+      Logger.log('✅ SOAP note prepended to top of Google Doc.');
+    } else {
+      Logger.log('❌ Verification failed: Note not found in Doc after write. Not marking as processed.');
+      // Optionally, mark as error for manual review
+      if (rowNumber !== null && uploadTimestampColIdx !== -1) {
+        const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+        if (sheet) {
+          sheet.getRange(rowNumber, uploadTimestampColIdx + 1).setValue('ERROR: Verification failed');
+        }
       }
     }
-    
-    Logger.log('✅ SOAP note prepended to top of Google Doc.');
   } catch (error) {
     Logger.log("❌ Error in processSOAPNote: " + error.toString());
   }
