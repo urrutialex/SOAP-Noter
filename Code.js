@@ -436,20 +436,19 @@ function testWithRow() {
     const lastRow = sheet.getLastRow();
     if (lastRow <= 1) return;
     
-    // Find the first unprocessed row (blank in Upload Timestamp)
-    let startRow = 2; // Start from data rows
+    // Collect all unprocessed rows (blank in Upload Timestamp) into an array
+    const unprocessedRows = [];
     for (let r = 2; r <= lastRow; r++) {
       const uploadValue = sheet.getRange(r, uploadTimestampColIdx + 1).getValue();
       if (!uploadValue) {
-        startRow = r;
-        break;
+        unprocessedRows.push(r);
       }
     }
     
-    Logger.log(`Starting processing from row ${startRow} to ${lastRow}`);
+    Logger.log(`Found ${unprocessedRows.length} unprocessed rows: ${unprocessedRows.join(', ')}`);
     
-    // Process from startRow to lastRow
-    for (let rowNumber = startRow; rowNumber <= lastRow; rowNumber++) {
+    // Process only the unprocessed rows
+    for (const rowNumber of unprocessedRows) {
       const rowData = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
       
       let jobCode = null;
@@ -488,5 +487,76 @@ function testWithRow() {
     }
   } catch (error) {
     Logger.log("Error in testWithRow: " + error.toString());
+  }
+}
+
+// === New Audit Function: Check and Re-Process Failed Rows ===
+function auditAndReprocess() {
+  try {
+    const sheet = getSpreadsheet().getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      Logger.log(`❌ Sheet '${SHEET_NAME}' not found.`);
+      return;
+    }
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const uploadTimestampColIdx = headers.indexOf('Upload Timestamp');
+    if (uploadTimestampColIdx === -1) {
+      Logger.log('❌ Upload Timestamp column not found.');
+      return;
+    }
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return;
+    
+    Logger.log('Starting audit of processed rows...');
+    let reprocessedCount = 0;
+    
+    for (let r = 2; r <= lastRow; r++) {
+      const uploadValue = sheet.getRange(r, uploadTimestampColIdx + 1).getValue();
+      if (!uploadValue || uploadValue.toString().startsWith('ERROR:')) {
+        // Skip unprocessed or already errored rows
+        continue;
+      }
+      
+      // Extract data for this row
+      const rowData = sheet.getRange(r, 1, 1, sheet.getLastColumn()).getValues()[0];
+      let jobCode = null;
+      let timestamp = null;
+      let responseId = null;
+      const responses = [];
+      
+      for (let i = 0; i < headers.length; i++) {
+        const columnName = headers[i];
+        const value = rowData[i];
+        if (columnName === JOB_CODE_COLUMN_NAME) {
+          jobCode = value;
+        } else if (columnName === 'Timestamp') {
+          timestamp = value;
+        } else if (columnName && columnName.toLowerCase().includes('response') && columnName.toLowerCase().includes('id')) {
+          responseId = value;
+        } else if (columnName && value !== null && value !== '' && columnName !== 'Upload Timestamp') {
+          responses.push({ question: columnName, answer: value });
+        }
+      }
+      
+      if (!jobCode || !timestamp || !responseId) {
+        Logger.log(`❌ Missing data in row ${r}. Skipping audit.`);
+        continue;
+      }
+      
+      // Check if the note is actually in the Doc
+      if (!isNoteInDoc(jobCode, responseId)) {
+        Logger.log(`❌ Audit failed for row ${r}: Note not found in Doc. Re-processing...`);
+        // Re-process
+        processSOAPNote(jobCode, responses, responseId, r, uploadTimestampColIdx);
+        reprocessedCount++;
+      } else {
+        Logger.log(`✅ Audit passed for row ${r}: Note found in Doc.`);
+      }
+    }
+    
+    Logger.log(`Audit complete. Re-processed ${reprocessedCount} rows.`);
+  } catch (error) {
+    Logger.log("Error in auditAndReprocess: " + error.toString());
   }
 }
